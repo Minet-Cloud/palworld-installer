@@ -1,103 +1,59 @@
-# Define the path to PalServer.exe
-$palServerPath = "C:\Program Files (x86)\Steam\steamapps\common\PalServer"
-$palServerExe = "$palServerPath\PalServer.exe" # Update this path
-$defaultSteamCmdPath = "C:\SteamCMD" # Default steamcmd installation path
+$ErrorActionPreference = "Stop"
 
-# Function to download and unzip steamcmd if not installed
-function Install-SteamCmd {
-    $steamCmdZipUrl = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
-    $steamCmdZipPath = "$defaultSteamCmdPath\steamcmd.zip"
-    $webClient = New-Object System.Net.WebClient
-    
-    # Create the directory if it doesn't exist
-    if (-not (Test-Path $defaultSteamCmdPath)) {
-        New-Item -Path $defaultSteamCmdPath -ItemType Directory
-    }
-
-    # Download and unzip steamcmd
-    $webClient.DownloadFile($steamCmdZipUrl, $steamCmdZipPath)
-    Expand-Archive -Path $steamCmdZipPath -DestinationPath $defaultSteamCmdPath -Force
-    Remove-Item -Path $steamCmdZipPath # Clean up ZIP file after extraction
-}
-
-# Function to check if steamcmd is installed
-function Get-SteamCmdInstalled {
-    $isInPath = Get-Command steamcmd -ErrorAction SilentlyContinue
-    $existsInDefaultLocation = Test-Path "$defaultSteamCmdPath\steamcmd.exe"
-
-    if ($isInPath) {
-        Write-Host "steamcmd is installed."
-    } else {
-        if (-not $existsInDefaultLocation) {
-            Write-Host "steamcmd not found. Installing..."
-            Install-SteamCmd
-            # Add the default location to the PATH for this session
-            $env:Path += ";$defaultSteamCmdPath"
-        }
+$ProcessNames = @("PalServer", "PalServer-Win64-Test-Cmd")
+foreach ($ProcessName in $ProcessNames) {
+    if (Get-Process $ProcessName -ErrorAction SilentlyContinue) {
+        Write-Host "$ProcessName is already running."
+        exit
     }
 }
 
-# Function to check and update the game server
-function Update-GameServer {
-    Write-Host "Checking for updates..."
-    & steamcmd +login anonymous +app_update 2394010 +quit
+$DirectoryPath = "C:\Program Files\PalServer\"
+if (-not (Test-Path -Path $directoryPath)) {
+    New-Item -ItemType Directory -Path $directoryPath | Out-Null
 }
 
-# Function to start the game server
-function Start-GameServer {
-    $arguments = "-log -nosteam -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS"
-    Start-Process -FilePath $palServerExe -ArgumentList $arguments -NoNewWindow
-}
+Write-Host "Start download vc_redist.x64.exe..."
+$VcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+$VcOutput = "C:\Program Files\PalServer\vc_redist.x64.exe"
+Invoke-WebRequest -Uri $VcUrl -OutFile $VcOutput
+Write-Host "Installing vc_redist.x64.exe..."
+Start-Process -FilePath $VcOutput -Args '/install', '/quiet', '/norestart' -Wait
+Remove-Item -Path $VcOutput
 
-# Function to check if the server is running
-function Get-ServerRunning {
-    $process = Get-Process PalServer -ErrorAction SilentlyContinue
-    return $null -ne $process
-}
+Write-Host "Start download dxwebsetup.exe..."
+$DxUrl = "https://download.microsoft.com/download/1/7/1/1718CCC4-6315-4D8E-9543-8E28A4E18C4C/dxwebsetup.exe"
+$DxOutput = "C:\Program Files\PalServer\dxwebsetup.exe"
+Invoke-WebRequest -Uri $DxUrl -OutFile $DxOutput
+Write-Host "Installing dxwebsetup.exe..."
+Start-Process -FilePath $DxOutput -Args '/Q' -Wait
+Remove-Item -Path $DxOutput
 
-# Function to get current timestamp
-function Get-Timestamp {
-    return Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-}
+Write-Host "Start download steamcmd.zip..."
+$StUrl = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
+$StOutput = "C:\Program Files\PalServer\steamcmd.zip"
+$StUnzipPath = "C:\Program Files\PalServer\steam\"
+Invoke-WebRequest -Uri $StUrl -OutFile $StOutput
+Expand-Archive -LiteralPath $StOutput -DestinationPath $StUnzipPath -Force
+Remove-Item -Path $StOutput
 
-function Backup-ServerData {
-    $sourcePath = "$palServerPath\Pal\Saved\"
-    $backupParentPath = "$palServerPath\Pal\Backups"
-    $backupPath = "$backupParentPath\Saved-Backup-" + (Get-Date -Format "yyyyMMddHHmmss")
-    Write-Host "Backing up server data to $backupPath..."
-    # Create the directory if it doesn't exist
-    if (-not (Test-Path $backupParentPath)) {
-        New-Item -Path $backupParentPath -ItemType Directory
-    }
-    # Create the directory if it doesn't exist
-    Copy-Item -Path $sourcePath -Destination $backupPath -Recurse -Force
-}
+Write-Host "Running steamcmd.exe..."
+Set-Location -Path $StUnzipPath
+Start-Process ".\steamcmd.exe" -ArgumentList "+login anonymous +app_update 2394010 validate +quit" -Wait
 
-# Initial setup and server start
-Get-SteamCmdInstalled
-Update-GameServer
-Start-GameServer
-$timestamp = Get-Timestamp
-Write-Host "$timestamp - Started PalServer.exe!"
+Write-Host "Setting scheduled task..."
+$TaskName = "PalServerAutoStart"
+$TaskDescription = "Automatically starts PalServer on system startup and restarts on failure."
+$TaskExecutable = "C:\Program Files\PalServer\steam\steamapps\common\PalServer\PalServer.exe"
+$TaskAction = New-ScheduledTaskAction -Execute $TaskExecutable
+$TaskTrigger = New-ScheduledTaskTrigger -AtStartup
+$TaskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
-# Continuously check if the server is running
-$backupInterval = 30 * 60 # 30 minutes in seconds
-$checkInterval = 10 # Check every 10 seconds
-$backupTimer = 0
-while ($true) {
-    Start-Sleep -Seconds $checkInterval
-    $backupTimer += $checkInterval
+$RestartInterval = New-TimeSpan -Minutes 1
+$RestartCount = 3
+$TaskSettings = New-ScheduledTaskSettingsSet -RestartInterval $RestartInterval -RestartCount $RestartCount
+Register-ScheduledTask -TaskName $TaskName -Description $TaskDescription -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal -Settings $TaskSettings -Force | Out-Null
 
-    # Check server status
-    if (-not (Get-ServerRunning)) {
-        $timestamp = Get-Timestamp
-        Write-Host "$timestamp - PalServer.exe is not running. Starting server..."
-        Start-GameServer
-    }
-
-    # Every 15 minutes, backup server data
-    if ($backupTimer -ge $backupInterval) {
-        Backup-ServerData
-        $backupTimer = 0 # Reset timer after backup
-    }
-}
+Write-Host "Running PalServer.exe..."
+Start-ScheduledTask -TaskName $TaskName
+Write-Host "PalServer deploy success!"
